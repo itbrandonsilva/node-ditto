@@ -1,0 +1,21 @@
+{
+  "name": "node-ditto",
+  "version": "1.0.0",
+  "description": "Replicates state objects across a web socket.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://www.github.com/itbrandonsilva/node-ditto"
+  },
+  "author": "Brandon Silva",
+  "license": "ISC",
+  "dependencies": {
+    "cookie": "^0.1.2",
+    "node-uuid": "^1.4.2",
+    "socket.io": "^1.2.1",
+    "watchjs": "0.0.0"
+  }
+}
