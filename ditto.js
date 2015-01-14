@@ -14,6 +14,12 @@ Utils.hashToArr = function (hash) {
     });
     return arr;
 };
+Utils.mergeObjects = function (n, o) {
+    Object.keys(n).forEach(function (k) {
+        o[k] = n[k];
+    });
+};
+
 
 var DittoObject = function (obj, ditto, options) {
     options = options || {};
@@ -25,47 +31,71 @@ var DittoObject = function (obj, ditto, options) {
     // <optional> _public = Any client can write to this object.
     
     this._ditto = ditto;
-    this._data = obj;
+    this.data = obj;
     this._id = options.id || uuid.v1();
     this._tag = options.tag;
     this._client = options.client;
-    this._writeable = options.writeable;
+    this._writable = options.writable;
     this._public = options.public;
+    this._new = true;
 
     var self = this;
-    watch(this._data, function () {
+    watch(this.data, function () {
         self.flag();
     }, options.depth);
+    this.flag();
 };
 
-DittoObject.prototype.getData       =   function () { return this._data; };
+DittoObject.prototype.getData       =   function () { return this.data; };
 DittoObject.prototype.getId         =   function () { return this._id; };
 DittoObject.prototype.getTag        =   function () { return this._tag; };
 DittoObject.prototype.getClient     =   function () { return this._client; };
 DittoObject.prototype.getWritable   =   function () { return this._writable; };
 DittoObject.prototype.getPublic     =   function () { return this._public; };
 
+DittoObject.prototype.isNew = function (bool) {
+    var isNew = this._new;
+    this._new = bool;
+    return isNew;
+};
+
 DittoObject.prototype.callWatchers = function () {
-    callWatchers(this._data);
+    callWatchers(this.data);
 };
 
 DittoObject.prototype.flag = function () {
     this._ditto.flag(this);
 };
 
-DittoObject.prototype.set = function (key, value) {
-    if ( this._data[key] !== value ) {
-        this._data[key] = value;
-        this._ditto.flag(this);
-    }
+DittoObject.prototype.overwrite = function (data) {
+    this.flag();
 };
 
 DittoObject.prototype.unref = function () {
     this._ditto.unref(this._id);
-    unwatch(this._data);
-    this._ditto = false;
+    unwatch(this.data);
+    delete this._ditto;
 };
 
+var DittoSocket = function (socket, ditto, options) {
+    options = options || {};
+    this._socket = socket;
+    this._ditto = ditto;
+    this._msgCount = 0;
+    this.id = socket.id
+    //this.emit = this._socket.emit;
+    this.lastMsg = false;
+
+    var self = this;
+    this._socket.on("ditto_sync", function () {
+        self._handleSync(arguments[0]);
+    });
+};
+
+DittoSocket.prototype._handleSync = function (data) {
+    this._ditto.receive(this, data);
+    this.lastMsg = data.msgId;
+};
 
 var Ditto = function (options) {
     options = options || {};
@@ -78,7 +108,7 @@ var Ditto = function (options) {
 
 Ditto.prototype.register = function (obj, options) {
     options = options || {};
-    if (options.id && this._map[options.id) return console.error("Object of id \"" + options.id + "\" exists in this ditto instance.");
+    if (options.id && this._map[options.id]) return console.error("Object of id \"" + options.id + "\" already exists in this ditto instance.");
     var obj = new DittoObject(obj, this, options);
     this._map[obj.getId()] = obj;
     return obj;
@@ -97,20 +127,22 @@ Ditto.prototype.start = function () {
         return function () {
             if (self.update) {
                 self.update(function () {
-                    self.emit();
+                    self._broadcast();
                 })
             } else {
-                self.emit();
+                self._broadcast();
             }
         };
     })(this), 1000/this._rate);
     this._started = true;
 };
 
-Ditto.prototype.addClient = function (socket, clientId) {
-    var id = socket.id = clientId || socket.id;
-    this._sockets[id] = socket;
-    this.emit(socket);
+Ditto.prototype.addClient = function (socket, options) {
+    options = options || {};
+    socket.id = options.id || socket.id;
+    socket = new DittoSocket(socket, this);
+    this._sockets[socket.id] = socket;
+    this._broadcast(socket);
 };
 
 Ditto.prototype.removeClient = function (id) {
@@ -138,7 +170,7 @@ Ditto.prototype.callWatchers = function () {
     });
 };
 
-Ditto.prototype.emit = function (socket) {
+Ditto.prototype._broadcast = function (socket) {
     this.callWatchers();
     var flagged; var sockets;
     if (socket) {
@@ -150,16 +182,32 @@ Ditto.prototype.emit = function (socket) {
     }
 
     sockets.forEach(function (socket) {
-        var compiled = {data: []};
+        var compiled = {data: [], lastMsg: socket.lastMsg};
         flagged.forEach(function (flagged) {
             var clientId = flagged.getClient();
             var pkg = {data: flagged.getData(), id: flagged.getId(), tag: flagged.getTag()};
             if ( (!clientId) || (socket.id === clientId) ) compiled.data.push(pkg); else return;
             if ( flagged.getPublic() || socket.id === flagged.getWritable() ) pkg.writable = true; else pkg.writable = false;
         });
-        socket.emit("data", compiled);
+        socket._socket.emit("ditto_sync", compiled);
     });
     if (!socket) this._flagged = [];
+};
+
+Ditto.prototype.receive = function (dittoSocket, data) {
+    var socketId = dittoSocket.id;
+
+    var self = this;
+    dittoSocket.lastMsg = data.msgId;
+    //if (data.data && data.data.length) console.log("Request length: " + data.data.length);
+    if (data.data) data.data.forEach(function (obj) {
+        //console.log("Received write request on: " + JSON.stringify(obj));
+        var dittoObject = self._map[obj.id];
+        if ( ! dittoObject ) return console.error("Client requested to modify an object that does not exist.");
+        if ( ! dittoObject.getWritable() == socketId ) return console.error("Client requested to modify object in which write permissions were NOT given.");
+        Utils.mergeObjects(obj.data, dittoObject.data);
+        //console.log("Accepted.");
+    });
 };
 
 module.exports = Ditto;
