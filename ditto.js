@@ -25,19 +25,20 @@ var DittoObject = function (obj, ditto, options) {
     options = options || {};
 
     // _id = How the server will identify this object.
-    // <optional> _tag = How clients will identify this object.
+    // <optional> _type = How clients will identify what kind of object this is.
     // <optional> _client = Only this client has knowledge of this object.
-    // <optional> _writable = Id of client who can write to this object.
+    // <optional> _owner = Id of client who can write to this object.
     // <optional> _public = Any client can write to this object.
     
     this._ditto = ditto;
     this.data = obj;
     this._id = options.id || uuid.v1();
-    this._tag = options.tag;
+    this._type = options.type;
     this._client = options.client;
-    this._writable = options.writable;
+    this._owner = options.owner;
     this._public = options.public;
     this._new = true;
+    this._getTags = options.getTags;
 
     var self = this;
     watch(this.data, function () {
@@ -48,9 +49,9 @@ var DittoObject = function (obj, ditto, options) {
 
 DittoObject.prototype.getData       =   function () { return this.data; };
 DittoObject.prototype.getId         =   function () { return this._id; };
-DittoObject.prototype.getTag        =   function () { return this._tag; };
+DittoObject.prototype.getType       =   function () { return this._type; };
 DittoObject.prototype.getClient     =   function () { return this._client; };
-DittoObject.prototype.getWritable   =   function () { return this._writable; };
+DittoObject.prototype.getOwner      =   function () { return this._owner; };
 DittoObject.prototype.getPublic     =   function () { return this._public; };
 
 DittoObject.prototype.isNew = function (bool) {
@@ -103,7 +104,7 @@ var Ditto = function (options) {
     this._map = {};
     this._flagged = [];
     this._sockets = {};
-    this._rate = options.rate || 1;
+    this._onReceive = options.onReceive;
 };
 
 Ditto.prototype.register = function (obj, options) {
@@ -114,6 +115,13 @@ Ditto.prototype.register = function (obj, options) {
     return obj;
 };
 
+Ditto.prototype.getById = function (id) {
+    var dittoObject = this._map[id];
+    if (dittoObject) {
+        return dittoObject.data;
+    }
+};
+
 Ditto.prototype.unref = function (id) {
     delete this._map[id];
 };
@@ -122,27 +130,12 @@ Ditto.prototype.flag = function (dittoObject) {
     this._flagged.push(dittoObject);
 };
 
-Ditto.prototype.start = function () {
-    setInterval((function (self) {
-        return function () {
-            if (self.update) {
-                self.update(function () {
-                    self._broadcast();
-                })
-            } else {
-                self._broadcast();
-            }
-        };
-    })(this), 1000/this._rate);
-    this._started = true;
-};
-
 Ditto.prototype.addClient = function (socket, options) {
     options = options || {};
     socket.id = options.id || socket.id;
     socket = new DittoSocket(socket, this);
     this._sockets[socket.id] = socket;
-    this._broadcast(socket);
+    this.broadcast(socket);
 };
 
 Ditto.prototype.removeClient = function (id) {
@@ -170,7 +163,7 @@ Ditto.prototype.callWatchers = function () {
     });
 };
 
-Ditto.prototype._broadcast = function (socket) {
+Ditto.prototype.broadcast = function (socket) {
     this.callWatchers();
     var flagged; var sockets;
     if (socket) {
@@ -185,10 +178,15 @@ Ditto.prototype._broadcast = function (socket) {
         var compiled = {data: [], lastMsg: socket.lastMsg};
         flagged.forEach(function (flagged) {
             var clientId = flagged.getClient();
-            var pkg = {data: flagged.getData(), id: flagged.getId(), tag: flagged.getTag()};
+            var ownerId = flagged.getOwner()
+            var pkg = {data: flagged.getData(), id: flagged.getId(), type: flagged.getType(), lastMsg: socket.lastMsg, tags: {}, writable: false};
             if ( (!clientId) || (socket.id === clientId) ) compiled.data.push(pkg); else return;
-            if ( flagged.getPublic() || socket.id === flagged.getWritable() ) pkg.writable = true; else pkg.writable = false;
+            if (socket.id === ownerId) {
+                pkg.writable = true;
+            }
+            if (flagged._getTags) pkg.tags = flagged._getTags(socket.id);
         });
+        if ( ! compiled.data.length ) return;
         socket._socket.emit("ditto_sync", compiled);
     });
     if (!socket) this._flagged = [];
@@ -199,14 +197,12 @@ Ditto.prototype.receive = function (dittoSocket, data) {
 
     var self = this;
     dittoSocket.lastMsg = data.msgId;
-    //if (data.data && data.data.length) console.log("Request length: " + data.data.length);
     if (data.data) data.data.forEach(function (obj) {
-        //console.log("Received write request on: " + JSON.stringify(obj));
         var dittoObject = self._map[obj.id];
         if ( ! dittoObject ) return console.error("Client requested to modify an object that does not exist.");
-        if ( ! dittoObject.getWritable() == socketId ) return console.error("Client requested to modify object in which write permissions were NOT given.");
+        if ( ! dittoObject.getOwner() == socketId ) return console.error("Client requested to modify object in which write permissions were NOT given.");
         Utils.mergeObjects(obj.data, dittoObject.data);
-        //console.log("Accepted.");
+        if (self._onReceive) self._onReceive(dittoObject, data.msgId);
     });
 };
 
